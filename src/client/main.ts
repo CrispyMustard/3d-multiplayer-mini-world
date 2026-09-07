@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { PartySocket } from "partysocket";
-import type { MoveMessage, PlayerState, ProfileMessage, ServerMessage } from "../types";
+import type { ChatMessage, MoveMessage, PlayerState, ProfileMessage, ServerMessage } from "../types";
 import { buildWorld, collidesWithWorld } from "./world";
 import "./style.css";
 
@@ -70,6 +70,40 @@ const createLabel = (text: string): THREE.Sprite => {
   return label;
 };
 
+const showBubble = (avatar: THREE.Mesh, text: string): void => {
+  const previous = avatar.getObjectByName("speech-bubble");
+  if (previous instanceof THREE.Sprite) {
+    previous.material.map?.dispose();
+    previous.material.dispose();
+    avatar.remove(previous);
+  }
+  const previousTimer = avatar.userData.bubbleTimer as number | undefined;
+  if (previousTimer) window.clearTimeout(previousTimer);
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 96;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.fillStyle = "rgba(255, 255, 255, 0.94)";
+  context.roundRect(5, 5, 502, 86, 20);
+  context.fill();
+  context.fillStyle = "#0f172a";
+  context.font = "600 30px system-ui";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(text.length > 32 ? `${text.slice(0, 31)}…` : text, 256, 48);
+  const bubble = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
+  bubble.name = "speech-bubble";
+  bubble.scale.set(4.2, 0.8, 1);
+  bubble.position.y = 3;
+  avatar.add(bubble);
+  avatar.userData.bubbleTimer = window.setTimeout(() => {
+    bubble.material.map?.dispose();
+    bubble.material.dispose();
+    avatar.remove(bubble);
+  }, 4500);
+};
+
 const setAvatarAppearance = (avatar: THREE.Mesh, name: string, color: string, local = false): void => {
   const oldLabel = avatar.getObjectByName("player-label");
   if (oldLabel instanceof THREE.Sprite) {
@@ -91,7 +125,7 @@ const localAvatar = createAvatar(localProfile.color);
 localAvatar.add(createLabel(`${localProfile.name} (You)`));
 scene.add(localAvatar);
 
-const remotePlayers = new Map<string, { mesh: THREE.Mesh; target: THREE.Vector3; ry: number }>();
+const remotePlayers = new Map<string, { mesh: THREE.Mesh; target: THREE.Vector3; ry: number; name: string }>();
 const addRemotePlayer = (player: PlayerState): void => {
   if (remotePlayers.has(player.id)) return;
   const mesh = createAvatar(player.color);
@@ -99,7 +133,8 @@ const addRemotePlayer = (player: PlayerState): void => {
   mesh.position.set(player.x, player.y + 0.9, player.z);
   mesh.rotation.y = player.ry;
   scene.add(mesh);
-  remotePlayers.set(player.id, { mesh, target: new THREE.Vector3(player.x, player.y + 0.9, player.z), ry: player.ry });
+  remotePlayers.set(player.id, { mesh, target: new THREE.Vector3(player.x, player.y + 0.9, player.z), ry: player.ry, name: player.name });
+  updateOnlineList();
 };
 const removeRemotePlayer = (id: string): void => {
   const remote = remotePlayers.get(id);
@@ -108,7 +143,62 @@ const removeRemotePlayer = (id: string): void => {
   remote.mesh.geometry.dispose();
   (remote.mesh.material as THREE.Material).dispose();
   remotePlayers.delete(id);
+  updateOnlineList();
 };
+
+const socialPanel = document.createElement("aside");
+socialPanel.className = "social-panel";
+socialPanel.innerHTML = `
+  <section class="online-section">
+    <h2>Online <span id="online-count">1</span></h2>
+    <ul id="online-list"></ul>
+  </section>
+  <section class="chat-section">
+    <div id="chat-log" class="chat-log" aria-live="polite"></div>
+    <form id="chat-form" class="chat-form">
+      <input name="message" maxlength="140" placeholder="Say something…" autocomplete="off" aria-label="Chat message">
+      <button type="submit">Send</button>
+    </form>
+    <small><span id="connection-status">Connecting…</span> · Press T to chat</small>
+  </section>`;
+app.appendChild(socialPanel);
+const onlineList = socialPanel.querySelector<HTMLUListElement>("#online-list");
+const onlineCount = socialPanel.querySelector<HTMLElement>("#online-count");
+const chatLog = socialPanel.querySelector<HTMLElement>("#chat-log");
+const chatForm = socialPanel.querySelector<HTMLFormElement>("#chat-form");
+const chatInput = socialPanel.querySelector<HTMLInputElement>('input[name="message"]');
+if (!onlineList || !onlineCount || !chatLog || !chatForm || !chatInput) throw new Error("Social controls were not created");
+
+const updateOnlineList = (): void => {
+  onlineList.replaceChildren();
+  const names = [`${localProfile.name} (You)`, ...[...remotePlayers.values()].map((player) => player.name)];
+  for (const name of names) {
+    const item = document.createElement("li");
+    item.textContent = name;
+    onlineList.appendChild(item);
+  }
+  onlineCount.textContent = String(names.length);
+};
+
+const appendChat = (name: string, text: string, timestamp = Date.now(), system = false): void => {
+  const entry = document.createElement("div");
+  entry.className = system ? "chat-entry system" : "chat-entry";
+  const time = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (system) {
+    entry.textContent = `${text} · ${time}`;
+  } else {
+    const author = document.createElement("strong");
+    author.textContent = name;
+    const message = document.createElement("span");
+    message.textContent = text;
+    entry.append(author, message);
+  }
+  chatLog.appendChild(entry);
+  while (chatLog.childElementCount > 30) chatLog.firstElementChild?.remove();
+  chatLog.scrollTop = chatLog.scrollHeight;
+};
+
+updateOnlineList();
 
 const host = import.meta.env.VITE_PARTYKIT_HOST ?? "localhost:1999";
 const socket = new PartySocket({ host, room: "main" });
@@ -116,11 +206,24 @@ const sendProfile = (): void => {
   const profile: ProfileMessage = { type: "profile", ...localProfile };
   socket.send(JSON.stringify(profile));
 };
+chatForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  const message: ChatMessage = { type: "chat", text };
+  socket.send(JSON.stringify(message));
+  chatInput.value = "";
+  chatInput.blur();
+});
+chatInput.addEventListener("blur", () => chatForm.classList.remove("active"));
 socket.addEventListener("message", (event: MessageEvent<string>) => {
   let message: ServerMessage;
   try { message = JSON.parse(event.data) as ServerMessage; } catch { return; }
   if (message.type === "existing-players") message.players.forEach(addRemotePlayer);
-  if (message.type === "join") addRemotePlayer(message.player);
+  if (message.type === "join") {
+    addRemotePlayer(message.player);
+    appendChat("", `${message.player.name} joined`, Date.now(), true);
+  }
   if (message.type === "player-move") {
     const remote = remotePlayers.get(message.player.id);
     if (remote) {
@@ -130,9 +233,22 @@ socket.addEventListener("message", (event: MessageEvent<string>) => {
   }
   if (message.type === "player-profile") {
     const remote = remotePlayers.get(message.player.id);
-    if (remote) setAvatarAppearance(remote.mesh, message.player.name, message.player.color);
+    if (remote) {
+      remote.name = message.player.name;
+      setAvatarAppearance(remote.mesh, message.player.name, message.player.color);
+      updateOnlineList();
+    }
   }
-  if (message.type === "leave") removeRemotePlayer(message.id);
+  if (message.type === "chat") {
+    appendChat(message.name, message.text, message.timestamp);
+    const avatar = message.id === socket.id ? localAvatar : remotePlayers.get(message.id)?.mesh;
+    if (avatar) showBubble(avatar, message.text);
+  }
+  if (message.type === "leave") {
+    const name = remotePlayers.get(message.id)?.name ?? "A player";
+    removeRemotePlayer(message.id);
+    appendChat("", `${name} left`, Date.now(), true);
+  }
 });
 
 const keys = new Set<string>();
@@ -140,6 +256,10 @@ let jumpQueued = false;
 let paused = false;
 let profileEditing = true;
 addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement) {
+    if (event.code === "Escape") event.target.blur();
+    return;
+  }
   if (event.code === "Escape") {
     if (profileEditing) {
       profileEditing = false;
@@ -150,6 +270,13 @@ addEventListener("keydown", (event) => {
     jumpQueued = false;
     keys.clear();
     updatePauseOverlay();
+    return;
+  }
+  if (event.code === "KeyT" && !paused && !profileEditing) {
+    event.preventDefault();
+    keys.clear();
+    chatForm.classList.add("active");
+    chatInput.focus();
     return;
   }
   keys.add(event.key.toLowerCase());
@@ -163,7 +290,7 @@ let cameraPitch = 0.45;
 let lastPointerX = 0;
 let lastPointerY = 0;
 renderer.domElement.addEventListener("pointermove", (event) => {
-  if (paused || profileEditing) {
+  if (paused || profileEditing || event.buttons !== 0) {
     lastPointerX = event.clientX;
     lastPointerY = event.clientY;
     return;
@@ -173,8 +300,10 @@ renderer.domElement.addEventListener("pointermove", (event) => {
     lastPointerY = event.clientY;
     return;
   }
-  cameraYaw -= (event.clientX - lastPointerX) * 0.006;
-  cameraPitch = THREE.MathUtils.clamp(cameraPitch + (event.clientY - lastPointerY) * 0.004, 0.15, 1.25);
+  const deltaX = event.clientX - lastPointerX;
+  const deltaY = event.clientY - lastPointerY;
+  cameraYaw -= deltaX * 0.006;
+  cameraPitch = THREE.MathUtils.clamp(cameraPitch + deltaY * 0.004, 0.15, 1.25);
   lastPointerX = event.clientX;
   lastPointerY = event.clientY;
 });
@@ -202,10 +331,6 @@ addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-const hud = document.createElement("div");
-hud.className = "hud";
-hud.innerHTML = "<strong>3D Mini-World</strong><small id=\"connection-status\">Connecting…</small><br><small>WASD to move · Space to jump · move mouse to look</small><br><button id=\"edit-profile\" type=\"button\">Edit player</button>";
-app.appendChild(hud);
 const pauseOverlay = document.createElement("div");
 pauseOverlay.style.cssText = "position:fixed;inset:0;display:none;place-items:center;background:rgb(15 23 42 / 45%);backdrop-filter:blur(4px);font-size:2rem;font-weight:700;letter-spacing:.04em;pointer-events:none";
 pauseOverlay.textContent = "PAUSED — press ESC to resume";
@@ -240,19 +365,13 @@ profileForm.addEventListener("submit", (event) => {
   localStorage.setItem("player-name", localProfile.name);
   localStorage.setItem("player-color", localProfile.color);
   setAvatarAppearance(localAvatar, localProfile.name, localProfile.color, true);
+  updateOnlineList();
   sendProfile();
   profileEditing = false;
   updateProfilePanel();
 });
-hud.querySelector<HTMLButtonElement>("#edit-profile")?.addEventListener("click", () => {
-  nameInput.value = localProfile.name;
-  colorInput.value = localProfile.color;
-  profileEditing = true;
-  updateProfilePanel();
-  nameInput.focus();
-});
 updateProfilePanel();
-const connectionStatus = hud.querySelector<HTMLElement>("#connection-status");
+const connectionStatus = socialPanel.querySelector<HTMLElement>("#connection-status");
 const setConnectionStatus = (text: string, color: string): void => {
   if (connectionStatus) {
     connectionStatus.textContent = text;

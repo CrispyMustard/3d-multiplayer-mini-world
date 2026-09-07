@@ -22,6 +22,11 @@ export interface ProfileMessage {
   color: string;
 }
 
+export interface ChatMessage {
+  type: "chat";
+  text: string;
+}
+
 export interface ExistingPlayersMessage {
   type: "existing-players";
   players: PlayerState[];
@@ -42,6 +47,14 @@ export interface PlayerProfileMessage {
   player: PlayerState;
 }
 
+export interface ChatBroadcastMessage {
+  type: "chat";
+  id: string;
+  name: string;
+  text: string;
+  timestamp: number;
+}
+
 export interface LeaveMessage {
   type: "leave";
   id: string;
@@ -52,4 +65,5 @@ export type ServerMessage =
   | JoinMessage
   | PlayerMoveMessage
   | PlayerProfileMessage
+  | ChatBroadcastMessage
   | LeaveMessage;

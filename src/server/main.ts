@@ -1,5 +1,7 @@
 import type * as Party from "partykit/server";
 import type {
+  ChatBroadcastMessage,
+  ChatMessage,
   JoinMessage,
   LeaveMessage,
   MoveMessage,
@@ -11,6 +13,7 @@ import type {
 } from "../types";
 
 const playersByRoom = new Map<string, Map<string, PlayerState>>();
+const lastActionAt = new Map<string, number>();
 const getPlayers = (roomId: string): Map<string, PlayerState> => {
   let players = playersByRoom.get(roomId);
   if (!players) {
@@ -41,6 +44,21 @@ function isProfileMessage(value: unknown): value is ProfileMessage {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<ProfileMessage>;
   return message.type === "profile" && typeof message.name === "string" && typeof message.color === "string";
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<ChatMessage>;
+  return message.type === "chat" && typeof message.text === "string";
+}
+
+function isRateLimited(roomId: string, playerId: string, cooldown: number): boolean {
+  const key = `${roomId}:${playerId}`;
+  const now = Date.now();
+  const previous = lastActionAt.get(key) ?? 0;
+  if (now - previous < cooldown) return true;
+  lastActionAt.set(key, now);
+  return false;
 }
 
 const server: Party.PartyKitServer = {
@@ -89,6 +107,21 @@ const server: Party.PartyKitServer = {
       return;
     }
 
+    if (isChatMessage(parsed)) {
+      if (isRateLimited(room.id, sender.id, 750)) return;
+      const text = parsed.text.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 140);
+      if (!text) return;
+      const chatMessage: ChatBroadcastMessage = {
+        type: "chat",
+        id: player.id,
+        name: player.name,
+        text,
+        timestamp: Date.now(),
+      };
+      room.broadcast(JSON.stringify(chatMessage));
+      return;
+    }
+
     if (!isMoveMessage(parsed)) return;
 
     player.x = Math.max(-24, Math.min(24, parsed.x));
@@ -103,6 +136,7 @@ const server: Party.PartyKitServer = {
   onClose(connection, room) {
     const players = getPlayers(room.id);
     if (!players.delete(connection.id)) return;
+    lastActionAt.delete(`${room.id}:${connection.id}`);
     const leaveMessage: LeaveMessage = { type: "leave", id: connection.id };
     room.broadcast(JSON.stringify(leaveMessage));
     if (players.size === 0) playersByRoom.delete(room.id);
