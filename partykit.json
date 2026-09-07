@@ -1,0 +1,5 @@
+{
+  "name": "3d-multiplayer-mini-world",
+  "main": "src/server/main.ts",
+  "compatibilityDate": "2024-01-01"
+}

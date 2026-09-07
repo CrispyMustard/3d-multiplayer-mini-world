@@ -1,0 +1,22 @@
+{
+  "name": "3d-multiplayer-mini-world",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:partykit": "npx partykit dev",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "partykit": "latest",
+    "partysocket": "latest",
+    "three": "latest"
+  },
+  "devDependencies": {
+    "@types/three": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}
