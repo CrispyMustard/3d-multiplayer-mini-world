@@ -142,7 +142,7 @@ renderer.domElement.addEventListener("pointermove", (event) => {
     return;
   }
   cameraYaw -= (event.clientX - lastPointerX) * 0.006;
-  cameraPitch = THREE.MathUtils.clamp(cameraPitch - (event.clientY - lastPointerY) * 0.004, 0.15, 1.25);
+  cameraPitch = THREE.MathUtils.clamp(cameraPitch + (event.clientY - lastPointerY) * 0.004, 0.15, 1.25);
   lastPointerX = event.clientX;
   lastPointerY = event.clientY;
 });
