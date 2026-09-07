@@ -111,7 +111,15 @@ socket.addEventListener("message", (event: MessageEvent<string>) => {
 
 const keys = new Set<string>();
 let jumpQueued = false;
+let paused = false;
 addEventListener("keydown", (event) => {
+  if (event.code === "Escape") {
+    paused = !paused;
+    jumpQueued = false;
+    keys.clear();
+    updatePauseOverlay();
+    return;
+  }
   keys.add(event.key.toLowerCase());
   if (event.code === "Space" && !event.repeat) jumpQueued = true;
 });
@@ -120,25 +128,23 @@ addEventListener("blur", () => keys.clear());
 
 let cameraYaw = 0;
 let cameraPitch = 0.45;
-let dragging = false;
 let lastPointerX = 0;
 let lastPointerY = 0;
-renderer.domElement.addEventListener("pointerdown", (event) => {
-  dragging = true;
-  lastPointerX = event.clientX;
-  lastPointerY = event.clientY;
-  renderer.domElement.setPointerCapture(event.pointerId);
-});
 renderer.domElement.addEventListener("pointermove", (event) => {
-  if (!dragging) return;
+  if (paused) {
+    lastPointerX = event.clientX;
+    lastPointerY = event.clientY;
+    return;
+  }
+  if (lastPointerX === 0 && lastPointerY === 0) {
+    lastPointerX = event.clientX;
+    lastPointerY = event.clientY;
+    return;
+  }
   cameraYaw -= (event.clientX - lastPointerX) * 0.006;
   cameraPitch = THREE.MathUtils.clamp(cameraPitch - (event.clientY - lastPointerY) * 0.004, 0.15, 1.25);
   lastPointerX = event.clientX;
   lastPointerY = event.clientY;
-});
-renderer.domElement.addEventListener("pointerup", (event) => {
-  dragging = false;
-  renderer.domElement.releasePointerCapture(event.pointerId);
 });
 
 const clock = new THREE.Clock();
@@ -152,6 +158,7 @@ const jumpSpeed = 9;
 let verticalVelocity = 0;
 
 const sendMove = (): void => {
+  if (paused) return;
   const move: MoveMessage = { type: "move", x: localPosition.x, y: localPosition.y, z: localPosition.z, ry: localRotation.y };
   socket.send(JSON.stringify(move));
 };
@@ -165,8 +172,15 @@ addEventListener("resize", () => {
 
 const hud = document.createElement("div");
 hud.className = "hud";
-hud.innerHTML = "<strong>3D Mini-World</strong><small id=\"connection-status\">Connecting…</small><br><small>WASD to move · Space to jump · drag to look</small>";
+hud.innerHTML = "<strong>3D Mini-World</strong><small id=\"connection-status\">Connecting…</small><br><small>WASD to move · Space to jump · move mouse to look</small>";
 app.appendChild(hud);
+const pauseOverlay = document.createElement("div");
+pauseOverlay.style.cssText = "position:fixed;inset:0;display:none;place-items:center;background:rgb(15 23 42 / 45%);backdrop-filter:blur(4px);font-size:2rem;font-weight:700;letter-spacing:.04em;pointer-events:none";
+pauseOverlay.textContent = "PAUSED — press ESC to resume";
+app.appendChild(pauseOverlay);
+const updatePauseOverlay = (): void => {
+  pauseOverlay.style.display = paused ? "grid" : "none";
+};
 const connectionStatus = hud.querySelector<HTMLElement>("#connection-status");
 const setConnectionStatus = (text: string, color: string): void => {
   if (connectionStatus) {
@@ -181,20 +195,22 @@ socket.addEventListener("error", () => setConnectionStatus("Connection error", "
 const animate = (): void => {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.1);
-  direction.set(Number(keys.has("d")) - Number(keys.has("a")), 0, Number(keys.has("s")) - Number(keys.has("w")));
-  if (direction.lengthSq() > 0) {
-    direction.normalize();
-    const rotatedDirection = direction.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
-    localPosition.addScaledVector(rotatedDirection, speed * delta);
-    localRotation.y = Math.atan2(rotatedDirection.x, rotatedDirection.z);
+  if (!paused) {
+    direction.set(Number(keys.has("d")) - Number(keys.has("a")), 0, Number(keys.has("s")) - Number(keys.has("w")));
+    if (direction.lengthSq() > 0) {
+      direction.normalize();
+      const rotatedDirection = direction.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
+      localPosition.addScaledVector(rotatedDirection, speed * delta);
+      localRotation.y = Math.atan2(rotatedDirection.x, rotatedDirection.z);
+    }
+    if (jumpQueued && localPosition.y === 0) verticalVelocity = jumpSpeed;
+    jumpQueued = false;
+    verticalVelocity -= gravity * delta;
+    localPosition.y = Math.max(0, localPosition.y + verticalVelocity * delta);
+    if (localPosition.y === 0) verticalVelocity = 0;
+    localPosition.x = THREE.MathUtils.clamp(localPosition.x, -worldLimit, worldLimit);
+    localPosition.z = THREE.MathUtils.clamp(localPosition.z, -worldLimit, worldLimit);
   }
-  if (jumpQueued && localPosition.y === 0) verticalVelocity = jumpSpeed;
-  jumpQueued = false;
-  verticalVelocity -= gravity * delta;
-  localPosition.y = Math.max(0, localPosition.y + verticalVelocity * delta);
-  if (localPosition.y === 0) verticalVelocity = 0;
-  localPosition.x = THREE.MathUtils.clamp(localPosition.x, -worldLimit, worldLimit);
-  localPosition.z = THREE.MathUtils.clamp(localPosition.z, -worldLimit, worldLimit);
   localAvatar.position.set(localPosition.x, localPosition.y + 0.9, localPosition.z);
   localAvatar.rotation.y = localRotation.y;
 
