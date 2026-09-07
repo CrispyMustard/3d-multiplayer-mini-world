@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { PartySocket } from "partysocket";
-import type { MoveMessage, PlayerState, ServerMessage } from "../types";
+import type { MoveMessage, PlayerState, ProfileMessage, ServerMessage } from "../types";
+import { buildWorld, collidesWithWorld } from "./world";
 import "./style.css";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -36,6 +37,7 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground, new THREE.GridHelper(50, 50, 0x38533c, 0x52734f));
+const obstacles = buildWorld(scene);
 
 const createAvatar = (color: string): THREE.Mesh => {
   const avatar = new THREE.Mesh(
@@ -62,22 +64,38 @@ const createLabel = (text: string): THREE.Sprite => {
   context.textBaseline = "middle";
   context.fillText(text, 128, 32);
   const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
+  label.name = "player-label";
   label.scale.set(2.2, 0.55, 1);
   label.position.y = 2.2;
   return label;
 };
 
+const setAvatarAppearance = (avatar: THREE.Mesh, name: string, color: string, local = false): void => {
+  const oldLabel = avatar.getObjectByName("player-label");
+  if (oldLabel instanceof THREE.Sprite) {
+    oldLabel.material.map?.dispose();
+    oldLabel.material.dispose();
+    avatar.remove(oldLabel);
+  }
+  (avatar.material as THREE.MeshStandardMaterial).color.set(color);
+  avatar.add(createLabel(local ? `${name} (You)` : name));
+};
+
+const savedName = localStorage.getItem("player-name")?.slice(0, 18) || `Player${Math.floor(100 + Math.random() * 900)}`;
+const savedColor = localStorage.getItem("player-color") || `#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0")}`;
+let localProfile = { name: savedName, color: savedColor };
+
 const localPosition = new THREE.Vector3(0, 0, 0);
 const localRotation = { y: 0 };
-const localAvatar = createAvatar(`#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0")}`);
-localAvatar.add(createLabel("You"));
+const localAvatar = createAvatar(localProfile.color);
+localAvatar.add(createLabel(`${localProfile.name} (You)`));
 scene.add(localAvatar);
 
 const remotePlayers = new Map<string, { mesh: THREE.Mesh; target: THREE.Vector3; ry: number }>();
 const addRemotePlayer = (player: PlayerState): void => {
   if (remotePlayers.has(player.id)) return;
   const mesh = createAvatar(player.color);
-  mesh.add(createLabel(`Player ${player.id.slice(0, 5)}`));
+  mesh.add(createLabel(player.name));
   mesh.position.set(player.x, player.y + 0.9, player.z);
   mesh.rotation.y = player.ry;
   scene.add(mesh);
@@ -94,6 +112,10 @@ const removeRemotePlayer = (id: string): void => {
 
 const host = import.meta.env.VITE_PARTYKIT_HOST ?? "localhost:1999";
 const socket = new PartySocket({ host, room: "main" });
+const sendProfile = (): void => {
+  const profile: ProfileMessage = { type: "profile", ...localProfile };
+  socket.send(JSON.stringify(profile));
+};
 socket.addEventListener("message", (event: MessageEvent<string>) => {
   let message: ServerMessage;
   try { message = JSON.parse(event.data) as ServerMessage; } catch { return; }
@@ -106,14 +128,24 @@ socket.addEventListener("message", (event: MessageEvent<string>) => {
       remote.ry = message.player.ry;
     }
   }
+  if (message.type === "player-profile") {
+    const remote = remotePlayers.get(message.player.id);
+    if (remote) setAvatarAppearance(remote.mesh, message.player.name, message.player.color);
+  }
   if (message.type === "leave") removeRemotePlayer(message.id);
 });
 
 const keys = new Set<string>();
 let jumpQueued = false;
 let paused = false;
+let profileEditing = true;
 addEventListener("keydown", (event) => {
   if (event.code === "Escape") {
+    if (profileEditing) {
+      profileEditing = false;
+      updateProfilePanel();
+      return;
+    }
     paused = !paused;
     jumpQueued = false;
     keys.clear();
@@ -131,7 +163,7 @@ let cameraPitch = 0.45;
 let lastPointerX = 0;
 let lastPointerY = 0;
 renderer.domElement.addEventListener("pointermove", (event) => {
-  if (paused) {
+  if (paused || profileEditing) {
     lastPointerX = event.clientX;
     lastPointerY = event.clientY;
     return;
@@ -158,7 +190,7 @@ const jumpSpeed = 9;
 let verticalVelocity = 0;
 
 const sendMove = (): void => {
-  if (paused) return;
+  if (paused || profileEditing) return;
   const move: MoveMessage = { type: "move", x: localPosition.x, y: localPosition.y, z: localPosition.z, ry: localRotation.y };
   socket.send(JSON.stringify(move));
 };
@@ -172,7 +204,7 @@ addEventListener("resize", () => {
 
 const hud = document.createElement("div");
 hud.className = "hud";
-hud.innerHTML = "<strong>3D Mini-World</strong><small id=\"connection-status\">Connecting…</small><br><small>WASD to move · Space to jump · move mouse to look</small>";
+hud.innerHTML = "<strong>3D Mini-World</strong><small id=\"connection-status\">Connecting…</small><br><small>WASD to move · Space to jump · move mouse to look</small><br><button id=\"edit-profile\" type=\"button\">Edit player</button>";
 app.appendChild(hud);
 const pauseOverlay = document.createElement("div");
 pauseOverlay.style.cssText = "position:fixed;inset:0;display:none;place-items:center;background:rgb(15 23 42 / 45%);backdrop-filter:blur(4px);font-size:2rem;font-weight:700;letter-spacing:.04em;pointer-events:none";
@@ -181,6 +213,45 @@ app.appendChild(pauseOverlay);
 const updatePauseOverlay = (): void => {
   pauseOverlay.style.display = paused ? "grid" : "none";
 };
+const profilePanel = document.createElement("div");
+profilePanel.className = "profile-backdrop";
+profilePanel.innerHTML = `
+  <form class="profile-panel">
+    <p class="eyebrow">WELCOME TO THE PLAZA</p>
+    <h1>Choose your player</h1>
+    <label>Name<input name="name" maxlength="18" autocomplete="nickname" required></label>
+    <label>Color<input name="color" type="color"></label>
+    <button type="submit">Enter world</button>
+  </form>`;
+app.appendChild(profilePanel);
+const profileForm = profilePanel.querySelector<HTMLFormElement>("form");
+const nameInput = profilePanel.querySelector<HTMLInputElement>('input[name="name"]');
+const colorInput = profilePanel.querySelector<HTMLInputElement>('input[name="color"]');
+if (!profileForm || !nameInput || !colorInput) throw new Error("Profile controls were not created");
+nameInput.value = localProfile.name;
+colorInput.value = localProfile.color;
+const updateProfilePanel = (): void => {
+  profilePanel.style.display = profileEditing ? "grid" : "none";
+};
+profileForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = nameInput.value.trim().replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 18);
+  localProfile = { name: name || localProfile.name, color: colorInput.value };
+  localStorage.setItem("player-name", localProfile.name);
+  localStorage.setItem("player-color", localProfile.color);
+  setAvatarAppearance(localAvatar, localProfile.name, localProfile.color, true);
+  sendProfile();
+  profileEditing = false;
+  updateProfilePanel();
+});
+hud.querySelector<HTMLButtonElement>("#edit-profile")?.addEventListener("click", () => {
+  nameInput.value = localProfile.name;
+  colorInput.value = localProfile.color;
+  profileEditing = true;
+  updateProfilePanel();
+  nameInput.focus();
+});
+updateProfilePanel();
 const connectionStatus = hud.querySelector<HTMLElement>("#connection-status");
 const setConnectionStatus = (text: string, color: string): void => {
   if (connectionStatus) {
@@ -188,19 +259,26 @@ const setConnectionStatus = (text: string, color: string): void => {
     connectionStatus.style.color = color;
   }
 };
-socket.addEventListener("open", () => setConnectionStatus("Connected to room: main", "#86efac"));
+socket.addEventListener("open", () => {
+  setConnectionStatus("Connected to room: main", "#86efac");
+  sendProfile();
+});
 socket.addEventListener("close", () => setConnectionStatus("Disconnected — reconnecting…", "#fca5a5"));
 socket.addEventListener("error", () => setConnectionStatus("Connection error", "#fca5a5"));
 
 const animate = (): void => {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.1);
-  if (!paused) {
+  if (!paused && !profileEditing) {
     direction.set(Number(keys.has("d")) - Number(keys.has("a")), 0, Number(keys.has("s")) - Number(keys.has("w")));
     if (direction.lengthSq() > 0) {
       direction.normalize();
       const rotatedDirection = direction.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
-      localPosition.addScaledVector(rotatedDirection, speed * delta);
+      const distance = speed * delta;
+      const nextX = localPosition.x + rotatedDirection.x * distance;
+      const nextZ = localPosition.z + rotatedDirection.z * distance;
+      if (!collidesWithWorld(nextX, localPosition.z, obstacles)) localPosition.x = nextX;
+      if (!collidesWithWorld(localPosition.x, nextZ, obstacles)) localPosition.z = nextZ;
       localRotation.y = Math.atan2(rotatedDirection.x, rotatedDirection.z);
     }
     if (jumpQueued && localPosition.y === 0) verticalVelocity = jumpSpeed;
