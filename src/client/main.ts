@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { PartySocket } from "partysocket";
 import type { ChatMessage, MoveMessage, PlayerState, ProfileMessage, ServerMessage } from "../types";
 import { buildWorld, collidesWithWorld } from "./world";
@@ -8,20 +9,23 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root was not found");
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 35, 100);
+scene.background = new THREE.Color(0xaebaa2);
+scene.fog = new THREE.Fog(0xaebaa2, 28, 75);
 
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 150);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.08;
 app.appendChild(renderer.domElement);
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x64748b, 2));
-const sunlight = new THREE.DirectionalLight(0xffffff, 2.5);
-sunlight.position.set(15, 25, 10);
+scene.add(new THREE.HemisphereLight(0xfff1cf, 0x35452d, 1.65));
+const sunlight = new THREE.DirectionalLight(0xffd49a, 3);
+sunlight.position.set(-18, 24, 12);
 sunlight.castShadow = true;
 sunlight.shadow.mapSize.set(2048, 2048);
 sunlight.shadow.camera.left = -30;
@@ -30,24 +34,90 @@ sunlight.shadow.camera.top = 30;
 sunlight.shadow.camera.bottom = -30;
 scene.add(sunlight);
 
+const loadTexture = (file: string, repeatX: number, repeatY: number): THREE.Texture => {
+  const texture = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}textures/${file}`);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(repeatX, repeatY);
+  texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return texture;
+};
+const meadowTexture = loadTexture("medieval-meadow.jpg", 8, 8);
+const cobblestoneTexture = loadTexture("medieval-cobblestone.jpg", 4, 4);
+const roadTexture = loadTexture("medieval-cobblestone.jpg", 1.5, 8);
+const oakTexture = loadTexture("medieval-oak.jpg", 2, 2);
+
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(50, 50),
-  new THREE.MeshStandardMaterial({ color: 0x668b5a, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ map: meadowTexture, color: 0xb8b88d, roughness: 1 }),
 );
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
-scene.add(ground, new THREE.GridHelper(50, 50, 0x38533c, 0x52734f));
-const obstacles = buildWorld(scene);
+scene.add(ground);
+const obstacles = buildWorld(scene, { cobblestone: cobblestoneTexture, road: roadTexture, oak: oakTexture });
 
-const createAvatar = (color: string): THREE.Mesh => {
-  const avatar = new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1.8, 1),
-    new THREE.MeshStandardMaterial({ color }),
-  );
-  avatar.position.y = 0.9;
-  avatar.castShadow = true;
+type Avatar = THREE.Group;
+let travelerTemplate: THREE.Group | null = null;
+const avatars = new Set<Avatar>();
+
+const createFallbackTraveler = (color: string): THREE.Group => {
+  const visual = new THREE.Group();
+  visual.name = "avatar-visual";
+  const tunic = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.2, 0.58), new THREE.MeshStandardMaterial({ color, roughness: 0.82 }));
+  tunic.name = "Tunic";
+  tunic.position.y = 1.25;
+  const skin = new THREE.MeshStandardMaterial({ color: 0xe8b982, roughness: 0.9 });
+  const leather = new THREE.MeshStandardMaterial({ color: 0x4a2c1b, roughness: 1 });
+  const cloth = new THREE.MeshStandardMaterial({ color: 0x6b2f2a, roughness: 1 });
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.65, 0.62), skin);
+  head.position.y = 2.08;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(0.48, 0.52, 8), cloth);
+  cap.position.y = 2.64;
+  cap.rotation.z = -0.08;
+  const belt = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.16, 0.64), leather);
+  belt.position.y = 1.05;
+  const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.72, 0.42), leather);
+  leftLeg.position.set(-0.24, 0.42, 0);
+  const rightLeg = leftLeg.clone();
+  rightLeg.position.x = 0.24;
+  const cape = new THREE.Mesh(new THREE.BoxGeometry(0.76, 1.05, 0.12), cloth);
+  cape.position.set(0, 1.35, 0.35);
+  visual.add(tunic, head, cap, belt, leftLeg, rightLeg, cape);
+  return visual;
+};
+
+const applyAvatarVisual = (avatar: Avatar): void => {
+  const oldVisual = avatar.getObjectByName("avatar-visual");
+  if (oldVisual) avatar.remove(oldVisual);
+  const color = avatar.userData.color as string;
+  const visual = travelerTemplate ? travelerTemplate.clone(true) : createFallbackTraveler(color);
+  visual.name = "avatar-visual";
+  if (travelerTemplate) visual.scale.setScalar(0.76);
+  visual.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.castShadow = true;
+    child.receiveShadow = true;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    const cloned = materials.map((entry) => entry.clone());
+    child.material = Array.isArray(child.material) ? cloned : cloned[0];
+    if (child.name === "Tunic") (child.material as THREE.MeshStandardMaterial).color.set(color);
+  });
+  avatar.add(visual);
+};
+
+const createAvatar = (color: string): Avatar => {
+  const avatar = new THREE.Group();
+  avatar.userData.color = color;
+  applyAvatarVisual(avatar);
+  avatars.add(avatar);
   return avatar;
 };
+
+new GLTFLoader().load(`${import.meta.env.BASE_URL}models/medieval-traveler.glb`, ({ scene: model }) => {
+  travelerTemplate = model;
+  avatars.forEach(applyAvatarVisual);
+});
 
 const createLabel = (text: string): THREE.Sprite => {
   const canvas = document.createElement("canvas");
@@ -55,22 +125,22 @@ const createLabel = (text: string): THREE.Sprite => {
   canvas.height = 64;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Could not create label canvas");
-  context.fillStyle = "rgba(15, 23, 42, 0.8)";
+  context.fillStyle = "rgba(48, 35, 24, 0.9)";
   context.roundRect(4, 4, 248, 56, 12);
   context.fill();
-  context.fillStyle = "#f8fafc";
-  context.font = "bold 28px system-ui";
+  context.fillStyle = "#fff1cf";
+  context.font = "bold 28px Georgia";
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.fillText(text, 128, 32);
   const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
   label.name = "player-label";
   label.scale.set(2.2, 0.55, 1);
-  label.position.y = 2.2;
+  label.position.y = 2.45;
   return label;
 };
 
-const showBubble = (avatar: THREE.Mesh, text: string): void => {
+const showBubble = (avatar: Avatar, text: string): void => {
   const previous = avatar.getObjectByName("speech-bubble");
   if (previous instanceof THREE.Sprite) {
     previous.material.map?.dispose();
@@ -84,11 +154,11 @@ const showBubble = (avatar: THREE.Mesh, text: string): void => {
   canvas.height = 96;
   const context = canvas.getContext("2d");
   if (!context) return;
-  context.fillStyle = "rgba(255, 255, 255, 0.94)";
+  context.fillStyle = "rgba(239, 217, 174, 0.96)";
   context.roundRect(5, 5, 502, 86, 20);
   context.fill();
-  context.fillStyle = "#0f172a";
-  context.font = "600 30px system-ui";
+  context.fillStyle = "#332419";
+  context.font = "600 30px Georgia";
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.fillText(text.length > 32 ? `${text.slice(0, 31)}…` : text, 256, 48);
@@ -104,14 +174,16 @@ const showBubble = (avatar: THREE.Mesh, text: string): void => {
   }, 4500);
 };
 
-const setAvatarAppearance = (avatar: THREE.Mesh, name: string, color: string, local = false): void => {
+const setAvatarAppearance = (avatar: Avatar, name: string, color: string, local = false): void => {
   const oldLabel = avatar.getObjectByName("player-label");
   if (oldLabel instanceof THREE.Sprite) {
     oldLabel.material.map?.dispose();
     oldLabel.material.dispose();
     avatar.remove(oldLabel);
   }
-  (avatar.material as THREE.MeshStandardMaterial).color.set(color);
+  avatar.userData.color = color;
+  const tunic = avatar.getObjectByName("Tunic");
+  if (tunic instanceof THREE.Mesh && tunic.material instanceof THREE.MeshStandardMaterial) tunic.material.color.set(color);
   avatar.add(createLabel(local ? `${name} (You)` : name));
 };
 
@@ -125,23 +197,28 @@ const localAvatar = createAvatar(localProfile.color);
 localAvatar.add(createLabel(`${localProfile.name} (You)`));
 scene.add(localAvatar);
 
-const remotePlayers = new Map<string, { mesh: THREE.Mesh; target: THREE.Vector3; ry: number; name: string }>();
+const remotePlayers = new Map<string, { mesh: Avatar; target: THREE.Vector3; ry: number; name: string }>();
 const addRemotePlayer = (player: PlayerState): void => {
   if (remotePlayers.has(player.id)) return;
   const mesh = createAvatar(player.color);
   mesh.add(createLabel(player.name));
-  mesh.position.set(player.x, player.y + 0.9, player.z);
+  mesh.position.set(player.x, player.y, player.z);
   mesh.rotation.y = player.ry;
   scene.add(mesh);
-  remotePlayers.set(player.id, { mesh, target: new THREE.Vector3(player.x, player.y + 0.9, player.z), ry: player.ry, name: player.name });
+  remotePlayers.set(player.id, { mesh, target: new THREE.Vector3(player.x, player.y, player.z), ry: player.ry, name: player.name });
   updateOnlineList();
 };
 const removeRemotePlayer = (id: string): void => {
   const remote = remotePlayers.get(id);
   if (!remote) return;
   scene.remove(remote.mesh);
-  remote.mesh.geometry.dispose();
-  (remote.mesh.material as THREE.Material).dispose();
+  remote.mesh.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.geometry.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material.dispose());
+  });
+  avatars.delete(remote.mesh);
   remotePlayers.delete(id);
   updateOnlineList();
 };
@@ -227,7 +304,7 @@ socket.addEventListener("message", (event: MessageEvent<string>) => {
   if (message.type === "player-move") {
     const remote = remotePlayers.get(message.player.id);
     if (remote) {
-      remote.target.set(message.player.x, message.player.y + 0.9, message.player.z);
+      remote.target.set(message.player.x, message.player.y, message.player.z);
       remote.ry = message.player.ry;
     }
   }
@@ -254,7 +331,7 @@ socket.addEventListener("message", (event: MessageEvent<string>) => {
 const keys = new Set<string>();
 let jumpQueued = false;
 let paused = false;
-let profileEditing = true;
+let profileEditing = !new URLSearchParams(location.search).has("preview");
 addEventListener("keydown", (event) => {
   if (event.target instanceof HTMLInputElement) {
     if (event.code === "Escape") event.target.blur();
@@ -308,7 +385,8 @@ renderer.domElement.addEventListener("pointermove", (event) => {
   lastPointerY = event.clientY;
 });
 
-const clock = new THREE.Clock();
+const timer = new THREE.Timer();
+timer.connect(document);
 const direction = new THREE.Vector3();
 const cameraTarget = new THREE.Vector3();
 const cameraOffset = new THREE.Vector3();
@@ -342,7 +420,7 @@ const profilePanel = document.createElement("div");
 profilePanel.className = "profile-backdrop";
 profilePanel.innerHTML = `
   <form class="profile-panel">
-    <p class="eyebrow">WELCOME TO THE PLAZA</p>
+    <p class="eyebrow">WELCOME TO THE KINGDOM</p>
     <h1>Choose your player</h1>
     <label>Name<input name="name" maxlength="18" autocomplete="nickname" required></label>
     <label>Color<input name="color" type="color"></label>
@@ -385,9 +463,10 @@ socket.addEventListener("open", () => {
 socket.addEventListener("close", () => setConnectionStatus("Disconnected — reconnecting…", "#fca5a5"));
 socket.addEventListener("error", () => setConnectionStatus("Connection error", "#fca5a5"));
 
-const animate = (): void => {
+const animate = (timestamp: number): void => {
   requestAnimationFrame(animate);
-  const delta = Math.min(clock.getDelta(), 0.1);
+  timer.update(timestamp);
+  const delta = Math.min(timer.getDelta(), 0.1);
   if (!paused && !profileEditing) {
     direction.set(Number(keys.has("d")) - Number(keys.has("a")), 0, Number(keys.has("s")) - Number(keys.has("w")));
     if (direction.lengthSq() > 0) {
@@ -408,7 +487,7 @@ const animate = (): void => {
     localPosition.x = THREE.MathUtils.clamp(localPosition.x, -worldLimit, worldLimit);
     localPosition.z = THREE.MathUtils.clamp(localPosition.z, -worldLimit, worldLimit);
   }
-  localAvatar.position.set(localPosition.x, localPosition.y + 0.9, localPosition.z);
+  localAvatar.position.set(localPosition.x, localPosition.y, localPosition.z);
   localAvatar.rotation.y = localRotation.y;
 
   cameraOffset.set(Math.sin(cameraYaw) * Math.cos(cameraPitch) * 8, Math.sin(cameraPitch) * 8, Math.cos(cameraYaw) * Math.cos(cameraPitch) * 8);
@@ -423,4 +502,4 @@ const animate = (): void => {
   renderer.render(scene, camera);
 };
 
-animate();
+requestAnimationFrame(animate);
